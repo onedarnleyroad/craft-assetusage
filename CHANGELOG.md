@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](http://keepachangelog.com/) and this project adheres to [Semantic Versioning](http://semver.org/).
 
+## 4.2.0 - 2026-02-08
+
+### Fixes
+
+- Postgresql support. Thanks to @niektenhoopen and @joostwaaijer
+
 ## 4.1.3 - 2024-09-24
 
 ### Updated
