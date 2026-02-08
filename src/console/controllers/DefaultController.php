@@ -68,14 +68,23 @@ class DefaultController extends Controller
         $subQueryRelations = (new Query())
             ->select('id')
             ->from(['relations' => Table::RELATIONS])
-            ->where('relations.targetId=assets.id')
-            ->orWhere('relations.sourceId=assets.id');
+            ->where('[[relations.targetId]]=[[assets.id]]')
+            ->orWhere('[[relations.sourceId]]=[[assets.id]]');
 
         $subQueryContent = (new Query())
             ->select('elementId as id')
-            ->from(Table::ELEMENTS_SITES)
-            ->where("`content` LIKE CONCAT('%asset:', assets.id, ':%')")
-            ->orWhere("`content` LIKE CONCAT('%\"imageId\": \"', assets.id, '\",%')");
+            ->from(Table::ELEMENTS_SITES);
+
+        // PostgreSQL requires explicit casting for JSONB columns
+        if (Craft::$app->getDb()->getIsPgsql()) {
+            $subQueryContent
+                ->where("CAST(content AS TEXT) LIKE CONCAT('%asset:', assets.id, ':%')")
+                ->orWhere("CAST(content AS TEXT) LIKE CONCAT('%\"imageId\": \"', assets.id, '\",%')");
+        } else {
+            $subQueryContent
+                ->where("`content` LIKE CONCAT('%asset:', assets.id, ':%')")
+                ->orWhere("`content` LIKE CONCAT('%\"imageId\": \"', assets.id, '\",%')");
+        }
 
         $query = (new Query())
             ->select(['assets.id', 'assets.filename'])

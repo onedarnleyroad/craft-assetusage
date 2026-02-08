@@ -86,12 +86,20 @@ class Asset extends Component
 
     private function queryContents(AssetElement $asset): array
     {
-        return (new Query())
-            ->select(['elementId as id', 'siteId'])
-            ->from(Table::ELEMENTS_SITES)
-            ->where(['like', 'content', "asset:{$asset->id}:"])
-            ->orWhere(['like', 'content', "\"imageId\": \"{$asset->id}\","])
-            ->all();
+        $query = (new Query())
+        ->select(['elementId as id', 'siteId'])
+        ->from(Table::ELEMENTS_SITES);
+    
+        // PostgreSQL requires explicit casting for JSONB columns
+        if (Craft::$app->getDb()->getIsPgsql()) {
+            $query->where(['like', 'CAST(content AS TEXT)', "asset:{$asset->id}:"])
+                ->orWhere(['like', 'CAST(content AS TEXT)', "\"imageId\": \"{$asset->id}\","]);
+        } else {
+            $query->where(['like', 'content', "asset:{$asset->id}:"])
+                ->orWhere(['like', 'content', "\"imageId\": \"{$asset->id}\","]);
+        }
+        
+        return $query->all();
     }
 
     /**
