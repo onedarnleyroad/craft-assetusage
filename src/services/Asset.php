@@ -7,38 +7,68 @@ use craft\base\Component;
 use craft\db\Query;
 use craft\db\Table;
 use craft\elements\Asset as AssetElement;
+use craft\elements\db\AssetQuery;
 use craft\helpers\ElementHelper;
 use roelvanhintum\assetusage\Plugin;
 
 class Asset extends Component
 {
     /**
+     * Request-scoped list of asset IDs visible on the current index page.
+     * Captured cheaply in EVENT_AFTER_PREPARE regardless of visible columns.
+     */
+    private ?array $indexAssetIds = null;
+
+    /**
+     * Request-scoped cache: assetId => formatted usage string.
+     * null = not yet primed. Only populated when the usage column is rendered.
+     */
+    private ?array $usageCountCache = null;
+
+    /**
+     * Captures the scoped asset ID list from the prepared query.
+     * Called from EVENT_AFTER_PREPARE — no usage queries run here.
+     */
+    public function captureIndexIds(AssetQuery $query): void
+    {
+        if ($this->indexAssetIds !== null) {
+            return;
+        }
+
+        $this->indexAssetIds = (clone $query->subQuery)
+            ->select(['elements.id'])
+            ->limit($query->limit)
+            ->offset($query->offset)
+            ->column();
+    }
+
+    /**
      * Count the number of times an asset is used and return a formatted string.
      * e.g. Used {count} times
+     *
+     * When index IDs have been captured, primes the full cache on first call
+     * so all subsequent calls in the same request are free array lookups.
+     * Falls back to a direct per-asset query outside the index context
+     * (editor panel, CLI, etc.).
      *
      * @param  AssetElement $asset
      * @return string
      */
     public function getUsageCount(AssetElement $asset): string
     {
-        $relations = array_merge($this->queryRelations($asset), $this->queryContents($asset));
-
-        if (Plugin::getInstance()->settings->includeRevisions) {
-            return $this->formatResults(count($relations));
+        if ($this->indexAssetIds !== null) {
+            $this->primeUsageCache();
+            return $this->usageCountCache[$asset->id] ?? $this->formatResults(0);
         }
 
-        $count = count(array_filter($relations, function($relation) {
-            try {
-                /** @var craft\base\Element */
-                $element = Craft::$app->elements->getElementById($relation['id'], null, $relation['siteId']);
+        // Fallback: per-asset query path for use outside the index context.
+        $relations = $this->queryRelations($asset);
 
-                return !!$element && !ElementHelper::isDraftOrRevision($element);
-            } catch (\Throwable $e) {
-                return false;
-            }
-        }));
+        if (Plugin::getInstance()->settings->includeContentSearch) {
+            $relations = array_merge($relations, $this->queryContents($asset->id));
+        }
 
-        return $this->formatResults($count);
+        return $this->formatResults(count($relations));
     }
 
     /**
@@ -49,22 +79,20 @@ class Asset extends Component
      */
     public function getUsedIn(AssetElement $asset): array
     {
-        $relations = array_merge($this->queryRelations($asset), $this->queryContents($asset));
+        $relations = $this->queryRelations($asset);
+
+        if (Plugin::getInstance()->settings->includeContentSearch) {
+            $relations = array_merge($relations, $this->queryContents($asset->id));
+        }
 
         $elements = [];
 
         foreach ($relations as $relation) {
             try {
-                /** @var craft\services\Elements */
-                $elementsService = Craft::$app->elements;
-
-                /** @var craft\base\Element */
-                $element = $elementsService->getElementById($relation['id'], null, $relation['siteId']);
-
+                $element = Craft::$app->elements->getElementById($relation['id'], null, $relation['siteId']);
                 $root = ElementHelper::rootElement($element);
-                $isRevision = $root->getIsDraft() || $root->getIsRevision();
 
-                if ($root && !$isRevision) {
+                if ($root) {
                     $elements[$root->id] = $root;
                 }
             } catch (\Throwable $e) {
@@ -75,30 +103,93 @@ class Asset extends Component
         return array_values($elements);
     }
 
-    private function queryRelations(AssetElement $asset): array
+    /**
+     * Primes $usageCountCache with a single batch query scoped to $indexAssetIds.
+     */
+    private function primeUsageCache(): void
     {
-        return (new Query())
-            ->select(['sourceId as id', 'sourceSiteId as siteId'])
+        if ($this->usageCountCache !== null) {
+            return;
+        }
+
+        $counts = array_fill_keys($this->indexAssetIds ?? [], 0);
+
+        if (empty($counts)) {
+            $this->usageCountCache = $counts;
+            return;
+        }
+
+        $query = (new Query())
+            ->select(['targetId'])
             ->from(Table::RELATIONS)
-            ->where(['targetId' => $asset->id])
-            ->all();
+            ->where(['targetId' => $this->indexAssetIds]);
+
+        if (!Plugin::getInstance()->settings->includeRevisions) {
+            $query
+                ->innerJoin(Table::ELEMENTS, '[[elements.id]] = [[relations.sourceId]]')
+                ->andWhere(['elements.draftId' => null])
+                ->andWhere(['elements.revisionId' => null]);
+        }
+
+        foreach ($query->all() as $row) {
+            $counts[(int)$row['targetId']]++;
+        }
+
+        if (Plugin::getInstance()->settings->includeContentSearch) {
+            foreach ($this->indexAssetIds as $assetId) {
+                $counts[$assetId] += count($this->queryContents($assetId));
+            }
+        }
+
+        $this->usageCountCache = [];
+        foreach ($counts as $assetId => $count) {
+            $this->usageCountCache[(int)$assetId] = $this->formatResults($count);
+        }
     }
 
-    private function queryContents(AssetElement $asset): array
+    private function queryRelations(AssetElement $asset): array
     {
         $query = (new Query())
-        ->select(['elementId as id', 'siteId'])
-        ->from(Table::ELEMENTS_SITES);
-    
+            ->select(['sourceId as id', 'sourceSiteId as siteId'])
+            ->from(Table::RELATIONS)
+            ->where(['targetId' => $asset->id]);
+
+        if (!Plugin::getInstance()->settings->includeRevisions) {
+            $query
+                ->innerJoin(Table::ELEMENTS, '[[elements.id]] = [[relations.sourceId]]')
+                ->andWhere(['elements.draftId' => null])
+                ->andWhere(['elements.revisionId' => null]);
+        }
+
+        return $query->all();
+    }
+
+    private function queryContents(int $assetId): array
+    {
+        $query = (new Query())
+            ->select(['elementId as id', 'siteId'])
+            ->from(Table::ELEMENTS_SITES);
+
+        if (!Plugin::getInstance()->settings->includeRevisions) {
+            $query
+                ->innerJoin(Table::ELEMENTS, '[[elements.id]] = [[elements_sites.elementId]]')
+                ->andWhere(['elements.draftId' => null])
+                ->andWhere(['elements.revisionId' => null]);
+        }
+
         // PostgreSQL requires explicit casting for JSONB columns
         if (Craft::$app->getDb()->getIsPgsql()) {
-            $query->where(['like', 'CAST(content AS TEXT)', "asset:{$asset->id}:"])
-                ->orWhere(['like', 'CAST(content AS TEXT)', "\"imageId\": \"{$asset->id}\","]);
+            $query->andWhere(['or',
+                ['like', 'CAST(content AS TEXT)', "asset:{$assetId}:"],
+                ['like', 'CAST(content AS TEXT)', "\"imageId\": \"{$assetId}\""],
+            ]);
         } else {
-            $query->where(['like', 'content', "asset:{$asset->id}:"])
-                ->orWhere(['like', 'content', "\"imageId\": \"{$asset->id}\","]);
+            $query->andWhere(['or',
+                ['like', 'content', "asset:{$assetId}:"],
+                ['like', 'content', "\"imageId\": \"{$assetId}\""],
+            ]);
         }
-        
+
         return $query->all();
     }
 
