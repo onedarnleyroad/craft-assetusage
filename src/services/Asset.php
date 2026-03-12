@@ -180,12 +180,12 @@ class Asset extends Component
         // PostgreSQL requires explicit casting for JSONB columns
         if (Craft::$app->getDb()->getIsPgsql()) {
             $query->andWhere(['or',
-                ['like', 'CAST(content AS TEXT)', "asset:{$assetId}:"],
+                ['like', 'CAST(content AS TEXT)', "asset:{$assetId}@"],
                 ['like', 'CAST(content AS TEXT)', "\"imageId\": \"{$assetId}\""],
             ]);
         } else {
             $query->andWhere(['or',
-                ['like', 'content', "asset:{$assetId}:"],
+                ['like', 'content', "asset:{$assetId}@"],
                 ['like', 'content', "\"imageId\": \"{$assetId}\""],
             ]);
         }
